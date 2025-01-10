@@ -203,7 +203,7 @@ class Cube:
         Returns:
             Graph: The graph object with namespaces bound.
         """
-        graph = Graph()
+        graph = Graph(bind_namespaces="none")
         for prefix, nmspc in Namespaces.items():
             graph.bind(prefix=prefix, namespace=nmspc)
         try:
@@ -236,7 +236,7 @@ class Cube:
         For dimensions with 'additive' mapping type, it adds a baseline URI in front of the value. For example the entry 1999 will be replaced with 
         https://ld.admin.ch/time/year/1999. 
         For dimensions with 'replace' mapping type, it replaces values in the dataframe column based on the specified replacements.
-        Finally, it converts the values in the dataframe column to URIRef objects.
+        Values are not transformed to URIRef or Literal.
         
         Returns:
             None
@@ -254,9 +254,6 @@ class Cube:
                         pat = re.compile(mapping.get("pattern"))
                         repl = mapping.get("replacement")
                         self._dataframe[dim_name] = self._dataframe[dim_name].map(lambda x: re.sub(pat, repl, x))
-                value_type = mapping.get("value-type", 'Shared')
-                assert value_type in ['Shared', 'Literal']
-                self._dataframe[dim_name] = self._dataframe[dim_name].map(lambda v: URIRef(v) if value_type == "Shared" else Literal(v))
 
     def _write_contact_point(self, contact_dict: dict) -> BNode|URIRef:
         """Writes a contact point to the graph.
@@ -303,7 +300,6 @@ class Cube:
         """Write observations to the cube.
 
         This function iterates over the rows in the dataframe and adds each row as an observation to the cube.
-        It also adds the observation URI to the observation set of the cube.
 
         Returns:
             Self
@@ -326,22 +322,25 @@ class Cube:
         self._graph.serialize(destination=filename, format="turtle", encoding="utf-8")
         return self
 
-    def _add_observation(self, obs: pd.DataFrame) -> None:
+    def _add_observation(self, obs: pd.Series) -> None:
         """Add an observation to the cube.
+
+        It also adds the observation URI to the observation set of the cube.
         
             Args:
-                obs (pd.DataFrame): The observation data to be added.
+                obs (pd.Series): The observation data to be added. These are the single rows from the _dataframe.
         
             Returns:
                 None
         """
-        self._graph.add((self._cube_uri + "/ObservationSet", CUBE.observation, obs.name))
+        self._graph.add((self._cube_uri + "/ObservationSet", CUBE.observation, obs.name)) #obs.name is the index of the row which was set to be the 'obs-uri'
         self._graph.add((obs.name, RDF.type, CUBE.Observation))
         self._graph.add((obs.name, CUBE.observedBy, URIRef(self._cube_dict.get("Creator")[0].get("IRI"))))
 
         for column in obs.keys():
-            path = URIRef(self._base_uri + self._get_shape_column(column).get("path"))
-            sanitized_value = self._sanitize_value(obs.get(column))
+            shape_column = self._get_shape_column(column)
+            path = URIRef(self._base_uri + shape_column.get("path"))
+            sanitized_value = self._sanitize_value(obs.get(column), shape_column.get("datatype"), shape_column.get("language"))
             self._graph.add((obs.name, URIRef(path), sanitized_value))
 
     def _get_shape_column(self, column: str):
@@ -450,14 +449,11 @@ class Cube:
             case _ as unrecognized:
                 print(f"Scale Type '{unrecognized}' is not recognized")
         
-        try:
-            match dim_dict.get("unit"):
-                case "kilogramm":
-                   self._graph.add((dim_node, QUDT.hasUnit, UNIT.KiloGM))
-                case "percent":
-                   self._graph.add((dim_node, QUDT.hasUnit, UNIT.PERCENT))
-        except KeyError:
-            pass
+        
+        # unit from https://www.qudt.org/doc/DOC_VOCAB-UNITS.html
+
+        if dim_dict.get("unit") != None:
+            self._graph.add((dim_node, QUDT.hasUnit, getattr(UNIT, dim_dict.get("unit"))))
 
         try:
             data_kind = dim_dict.get("data-kind")
@@ -554,24 +550,28 @@ class Cube:
         self._graph.add((dim_node, SH.max, Literal(_max)))
 
     @staticmethod
-    def _sanitize_value(value) -> Literal|URIRef:
+    def _sanitize_value(value, datatype, lang) -> Literal|URIRef:
         """Sanitize the input value to ensure it is in a valid format.
         
             Args:
                 value: The value to be sanitized.
+                datatype: The datatype of the value, given as string from XSD namespace (e.g. "integer", "string", "gYear", ...).
+                lang: The language of the value if it is a string (e.g. "de", "fr", ...).
         
             Returns:
-                Literal or URIRef: The sanitized value in the form of a Literal or URIRef.
+                Literal or URIRef: The sanitized value in the form of a typed or language tagged Literal or URIRef.
         """
-        if isinstance(value, numbers.Number):
-            if pd.isna(value):
-                return Literal("", datatype=CUBE.Undefined)
-            else:
-                return Literal(value, datatype=XSD.decimal)
-        elif isinstance(value, URIRef):
-            return value
+        if pd.isna(value):
+            return Literal("", datatype=CUBE.Undefined)
+        elif datatype == "URI":
+            return URIRef(value)
+        elif lang!=None:
+            return Literal(value, lang=lang)
         else:
-            return Literal(str(value))
+            if datatype != None:
+                return Literal(value, datatype=getattr(XSD, datatype))
+            else:
+                return Literal(value)
 
 
 
